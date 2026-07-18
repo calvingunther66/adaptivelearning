@@ -5,19 +5,25 @@ Commands:
   backtest     walk-forward evaluation: ensemble vs. every solo model
   interactive  feed values one at a time and watch rewards/punishments
   demo         run the whole loop on a built-in synthetic series
+  fetch        download historical prices from Yahoo Finance to CSV
+  experiment   warm up on the first N trading days, then tick-by-tick
+               predict -> correct -> repeat to the end of the data
 """
 
 from __future__ import annotations
 
 import argparse
 import math
+import os
 import random
 import sys
 from typing import List, Optional, Sequence
 
 from .data import DataError, load_series
 from .ensemble import AdaptiveEnsemble
-from .predictors import default_predictors
+from .experiment import run_experiment
+from .fetch import FetchError, fetch_series, load_csv, save_csv
+from .predictors import SeasonalNaive, default_predictors
 
 
 # ------------------------------------------------------------------ helpers
@@ -188,6 +194,69 @@ def cmd_demo(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fetch(args: argparse.Namespace) -> int:
+    os.makedirs(args.out, exist_ok=True)
+    failures = 0
+    for symbol in args.symbols:
+        try:
+            rows = fetch_series(symbol, interval=args.interval, range_=args.range)
+        except FetchError as exc:
+            print(f"  {symbol}: FAILED ({exc})", file=sys.stderr)
+            failures += 1
+            continue
+        path = os.path.join(args.out, f"{symbol.upper()}_{args.interval}.csv")
+        save_csv(path, rows)
+        print(f"  {symbol.upper()}: {len(rows)} bars "
+              f"({rows[0][0]} .. {rows[-1][0]}) -> {path}")
+    return 1 if failures == len(args.symbols) else 0
+
+
+def cmd_experiment(args: argparse.Namespace) -> int:
+    exit_code = 0
+    for path in args.files:
+        try:
+            rows = load_csv(path)
+        except (FetchError, FileNotFoundError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        predictors = default_predictors()
+        if args.seasonal:
+            predictors.append(SeasonalNaive(args.seasonal))
+        ensemble = AdaptiveEnsemble(predictors=predictors, eta=args.eta,
+                                    weight_floor=args.floor)
+        try:
+            report = run_experiment(rows, warmup_days=args.warmup_days,
+                                    n_segments=args.segments, ensemble=ensemble)
+        except ValueError as exc:
+            print(f"error: {path}: {exc}", file=sys.stderr)
+            exit_code = 1
+            continue
+
+        name = os.path.basename(path)
+        print(f"=== {name}: {len(rows)} ticks "
+              f"({rows[0][0]} .. {rows[-1][0]})")
+        print(f"    warm-up: first {report.warmup_days} trading days "
+              f"({report.warmup_ticks} ticks observed, not scored)")
+        print(f"    scored:  {report.scored_ticks} ticks of predict -> correct -> repeat")
+        print()
+        print(f"    {'segment':<9} {'ticks':>7} {'MAE':>10} {'naive MAE':>10} "
+              f"{'edge':>7} {'win%':>6} {'dir%':>6}  top model")
+        for seg in report.segments:
+            print(f"    {seg.label:<9} {seg.ticks:>7} {seg.mae:>10.4f} "
+                  f"{seg.naive_mae:>10.4f} {seg.edge_vs_naive:>+6.1%} "
+                  f"{seg.win_rate:>6.1%} {seg.direction_hits:>6.1%}  {seg.top_model}")
+        print(f"    {'overall':<9} {report.scored_ticks:>7} {report.overall_mae:>10.4f} "
+              f"{report.overall_naive_mae:>10.4f} {report.overall_edge:>+6.1%} "
+              f"{report.overall_win_rate:>6.1%} {report.overall_direction_hits:>6.1%}")
+        print()
+        top = ", ".join(f"{n} {w:.1%}" for n, w in report.final_weights[:3])
+        print(f"    final trust: {top}")
+        print()
+    return exit_code
+
+
 def _read_value(prompt: str, ensemble: Optional[AdaptiveEnsemble] = None) -> Optional[float]:
     while True:
         try:
@@ -256,10 +325,39 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     _add_common(p, needs_file=False)
     p.set_defaults(func=cmd_demo)
 
+    p = sub.add_parser("fetch", help="download historical prices from Yahoo Finance")
+    p.add_argument("symbols", nargs="+", help="ticker symbols, e.g. AAPL NVDA SPY")
+    p.add_argument("--interval", default="1m",
+                   help="bar size: 1m 5m 1h 1d ... (default 1m; 1m only covers ~7 days)")
+    p.add_argument("--range", default="7d",
+                   help="how far back: 7d 60d 1y max ... (default 7d)")
+    p.add_argument("--out", default="data",
+                   help="output directory for CSVs (default data/)")
+    p.set_defaults(func=cmd_fetch)
+
+    p = sub.add_parser(
+        "experiment",
+        help="warm up on the first N trading days, then predict -> correct "
+             "-> repeat tick by tick to the end of the data",
+    )
+    p.add_argument("files", nargs="+", help="fetch-format CSVs (datetime,close)")
+    p.add_argument("--warmup-days", type=int, default=4,
+                   help="trading days to observe before scoring starts (default 4)")
+    p.add_argument("--segments", type=int, default=4,
+                   help="report segments to split the scored span into (default 4)")
+    p.add_argument("--seasonal", type=int, default=0, metavar="PERIOD",
+                   help="add an extra seasonal-naive model with this period "
+                        "(e.g. 390 = one trading day of 1m bars)")
+    p.add_argument("--eta", type=float, default=1.0,
+                   help="learning rate: how hard to reward/punish (default 1.0)")
+    p.add_argument("--floor", type=float, default=0.01,
+                   help="uniform weight mixed back each round (default 0.01)")
+    p.set_defaults(func=cmd_experiment)
+
     args = parser.parse_args(argv)
     try:
         return args.func(args)
-    except DataError as exc:
+    except (DataError, FetchError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     except FileNotFoundError as exc:

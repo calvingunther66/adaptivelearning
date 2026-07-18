@@ -122,6 +122,37 @@ Type `weights` at the prompt to see the leaderboard, `quit` to exit.
 adaptivelearning demo
 ```
 
+## Market experiments: predict → correct → repeat
+
+Two commands turn the app into a live market experiment. `fetch` pulls
+historical prices from Yahoo Finance (no API key); `experiment` runs the
+walk-forward protocol: observe the first few trading days as warm-up, then for
+every tick predict the next close, score against reality, reward/punish the
+models, and continue to the end of the data.
+
+```bash
+# finest free resolution: 1-minute bars for the last ~7 days
+adaptivelearning fetch AAPL NVDA SPY QQQ --interval 1m --range 7d
+adaptivelearning experiment data/AAPL_1m.csv --warmup-days 3 --seasonal 390
+
+# the long game: daily bars for a decade
+adaptivelearning fetch AAPL NVDA SPY --interval 1d --range 10y
+adaptivelearning experiment data/AAPL_1d.csv --warmup-days 5
+```
+
+(True second-by-second history only exists on paid tick feeds; Yahoo's 1-minute
+bars are the finest resolution available for free. Note that `1d/max` gets
+silently downgraded to quarterly bars — use `--range 10y` for real daily data.)
+
+The report splits the scored span into segments and shows, per segment: MAE,
+the naive last-value baseline MAE, the ensemble's *edge* over that baseline,
+its win rate against it, directional accuracy, and which model held the most
+trust. On real market data expect a humbling, honest result: prices at these
+timescales are close to a random walk, so the reward/punishment loop's main
+"learning" is correctly concentrating trust in the naive/drift models — which
+is exactly what online learning theory says it should do when no fancier
+structure exists.
+
 ### Tuning
 
 | flag | default | effect |
