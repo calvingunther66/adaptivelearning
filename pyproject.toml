@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "adaptivelearning"
+version = "0.1.0"
+description = "Adaptive next-value prediction for any numeric time series, with reward/punishment-driven model weighting"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "Calvin Gunther" }]
+keywords = ["time-series", "forecasting", "online-learning", "multiplicative-weights"]
+
+[project.scripts]
+adaptivelearning = "adaptivelearning.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
